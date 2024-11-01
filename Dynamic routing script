@@ -1,0 +1,152 @@
+import simpy
+import random
+import matplotlib.pyplot as plt
+
+# Constants
+PACKET_SIZE = 1024  # Packet size in bytes
+BASE_BANDWIDTH = 10  # Base Mbps for each link
+BASE_LATENCY = 10  # Base latency in milliseconds
+SIM_TIME = 20  # Total simulation time in seconds
+
+# Environment setup
+env = simpy.Environment()
+
+# Data storage for metrics
+latency_data = []
+bandwidth_data = []
+packet_loss_data = []
+routing_decision_data = []
+loss_messages = []  # To store packet loss messages
+
+# Dynamic routing table with initial latencies, bandwidths, and packet loss rates
+routing_table = {
+    "Router1": {"Router2": (BASE_LATENCY, BASE_BANDWIDTH, 0.05),
+                "Router3": (BASE_LATENCY * 1.5, BASE_BANDWIDTH * 0.8, 0.1)},
+    "Router2": {"Router3": (BASE_LATENCY, BASE_BANDWIDTH, 0.03),
+                "Router1": (BASE_LATENCY * 1.2, BASE_BANDWIDTH * 0.9, 0.04)},
+    "Router3": {"Router1": (BASE_LATENCY * 1.1, BASE_BANDWIDTH * 0.7, 0.06),
+                "Router2": (BASE_LATENCY * 0.9, BASE_BANDWIDTH, 0.02)}
+}
+
+# Define Packet class to store packet details
+class Packet:
+    def __init__(self, src, dest, size=PACKET_SIZE):
+        self.src = src
+        self.dest = dest
+        self.size = size
+        self.start_time = env.now
+        self.lost = False  # Track if the packet is lost during transmission
+
+# Link function simulates packet transfer with latency, bandwidth, and packet loss
+def link(env, src, dest, bandwidth, latency, packet_loss_rate, packet):
+    if random.random() < packet_loss_rate:
+        packet.lost = True
+        packet_loss_data.append((env.now, src, dest, packet_loss_rate))
+        loss_messages.append(f"Packet from {packet.src} to {packet.dest} was lost due to high packet loss rate.")
+        return
+
+    transmission_delay = (packet.size * 8) / (bandwidth * 1e6)  # Convert Mbps to seconds
+    yield env.timeout(latency / 1000)  # Latency in seconds
+    yield env.timeout(transmission_delay)
+
+    latency_data.append((env.now, src, dest, latency))
+    bandwidth_data.append((env.now, src, dest, bandwidth))
+    print(f"Packet from {packet.src} to {packet.dest} delivered at time {env.now:.2f}s")
+
+# Router function with dynamic routing updates and cost-based path selection
+def router(env, name, destination):
+    while True:
+        update_routing_table(name)
+        if destination in routing_table[name]:
+            route_options = routing_table[name]
+            best_route = min(route_options, key=lambda x: calculate_cost(*route_options[x]))
+            latency, bandwidth, packet_loss_rate = route_options[best_route]
+
+            packet = Packet(name, best_route)
+            routing_decision_data.append((env.now, name, best_route, calculate_cost(latency, bandwidth, packet_loss_rate)))
+            env.process(link(env, name, best_route, bandwidth, latency, packet_loss_rate, packet))
+
+        yield env.timeout(2)  # Inter-packet delay for simulation
+
+# Calculate cost based on latency, bandwidth, and packet loss rate
+def calculate_cost(latency, bandwidth, packet_loss_rate):
+    return latency * (1 / bandwidth) + packet_loss_rate * 100
+
+# Function to simulate dynamic network updates
+def update_routing_table(router_name):
+    for dest, (latency, bandwidth, packet_loss_rate) in routing_table[router_name].items():
+        new_latency = latency * random.uniform(0.8, 1.2)
+        new_bandwidth = bandwidth * random.uniform(0.7, 1.1)
+        new_packet_loss_rate = min(0.1, packet_loss_rate * random.uniform(0.8, 1.3))
+        routing_table[router_name][dest] = (new_latency, new_bandwidth, new_packet_loss_rate)
+        print(f"Updated route from {router_name} to {dest}: latency={new_latency:.2f} ms, "
+              f"bandwidth={new_bandwidth:.2f} Mbps, packet loss={new_packet_loss_rate:.2%}")
+
+# Start simulation processes for each router
+env.process(router(env, "Router1", "Router3"))  # Router1 aiming for Router3
+env.process(router(env, "Router2", "Router3"))  # Router2 aiming for Router3
+env.process(router(env, "Router3", "Router1"))  # Router3 aiming for Router1
+
+# Run the simulation
+env.run(until=SIM_TIME)
+
+# Plot Latency
+plt.figure()
+if latency_data:
+    for src, dest in set((s, d) for _, s, d, _ in latency_data):
+        times = [t for t, s, d, _ in latency_data if s == src and d == dest]
+        latencies = [lat for _, s, d, lat in latency_data if s == src and d == dest]
+        plt.plot(times, latencies, label=f"{src}->{dest}", marker='o')
+    plt.title("Latency Over Time per Router Path")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Latency (ms)")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+# Plot Bandwidth
+plt.figure()
+if bandwidth_data:
+    for src, dest in set((s, d) for _, s, d, _ in bandwidth_data):
+        times = [t for t, s, d, _ in bandwidth_data if s == src and d == dest]
+        bandwidths = [bw for _, s, d, bw in bandwidth_data if s == src and d == dest]
+        plt.plot(times, bandwidths, label=f"{src}->{dest}", marker='o')
+    plt.title("Bandwidth Over Time per Router Path")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Bandwidth (Mbps)")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+# Plot Packet Loss
+plt.figure()
+if packet_loss_data:
+    for src, dest in set((s, d) for _, s, d, _ in packet_loss_data):
+        times = [t for t, s, d, _ in packet_loss_data if s == src and d == dest]
+        losses = [loss for _, s, d, loss in packet_loss_data if s == src and d == dest]
+        plt.scatter(times, losses, label=f"{src}->{dest}", color='r', marker='x')
+    plt.title("Packet Loss Events Over Time per Router Path")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Packet Loss Rate")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+# Plot Routing Decision Costs
+plt.figure()
+if routing_decision_data:
+    for src, dest in set((s, d) for _, s, d, _ in routing_decision_data):
+        times = [t for t, s, d, _ in routing_decision_data if s == src and d == dest]
+        costs = [cost for _, s, d, cost in routing_decision_data if s == src and d == dest]
+        plt.plot(times, costs, label=f"{src}->{dest}", marker='o')
+    plt.title("Routing Decision Costs Over Time per Router Path")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Cost")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+# Print packet loss messages at the end
+print("\nPacket Loss Summary:")
+for message in loss_messages:
+    print(message)
